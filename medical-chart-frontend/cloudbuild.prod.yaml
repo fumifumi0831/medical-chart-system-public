@@ -1,0 +1,12 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      '--build-arg', 'NEXT_PUBLIC_API_URL=https://medical-chart-backend-834627244484.asia-northeast1.run.app',
+      '--build-arg', 'NEXT_PUBLIC_API_KEY=${_API_KEY}',
+      '--build-arg', 'NEXT_PUBLIC_ENVIRONMENT=prod',
+      '-t', 'asia-northeast1-docker.pkg.dev/${PROJECT_ID}/medical-charts-repo/frontend:v2',
+      '.'
+    ]
+images:
+  - 'asia-northeast1-docker.pkg.dev/${PROJECT_ID}/medical-charts-repo/frontend:v2' 

@@ -1,0 +1,17 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      # 開発バックエンドのURLをビルド時引数で渡す (実行時に --substitutions で指定)
+      '--build-arg', 'NEXT_PUBLIC_API_URL=${_BACKEND_URL}',
+      # 開発APIキーをビルド時引数で渡す (実行時に --substitutions で指定)
+      '--build-arg', 'NEXT_PUBLIC_API_KEY=${_API_KEY}',
+      # 環境名を 'dev' に設定
+      '--build-arg', 'NEXT_PUBLIC_ENVIRONMENT=dev',
+      # 開発リポジトリと dev タグを指定 (PROJECT_IDは実行時に解決)
+      '-t', 'asia-northeast1-docker.pkg.dev/${PROJECT_ID}/medical-charts-repo-dev/frontend:dev',
+      '.'
+    ]
+images:
+  # 開発リポジトリと dev タグを指定 (PROJECT_IDは実行時に解決)
+  - 'asia-northeast1-docker.pkg.dev/${PROJECT_ID}/medical-charts-repo-dev/frontend:dev' 

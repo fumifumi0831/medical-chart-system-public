@@ -1,0 +1,83 @@
+services:
+  # バックエンドAPI (FastAPI)
+  backend:
+    container_name: medical-chart-backend
+    build:
+      context: ./medical-chart-backend
+      dockerfile: Dockerfile_local
+    # ポートマッピング
+    ports:
+      - "8000:8000"
+    # ローカルのファイルをマウント
+    volumes:
+      - ./medical-chart-backend:/app
+      - ./medical-chart-backend/credentials:/app/credentials
+    environment:
+      - ENVIRONMENT=local
+      - API_KEY=your_api_key_here # フロントエンドのAPIキーと同じ
+      - DATABASE_URL=postgresql://fumipen:your_password_here@db:5432/medical_chart_local # データベースのURL
+      - DB_USER=fumipen # データベースのユーザー名
+      - DB_PASSWORD=your_password_here # データベースのパスワード
+      - DB_HOST=db # データベースのホスト名
+      - DB_PORT=5432 # データベースのポート番号
+      - DB_NAME=medical_chart_local # データベースの名前
+      - GCS_BUCKET_NAME=medical-chart-local # バケットの名前
+      - DEBUG=True # デバッグモード 
+      - CREATE_TABLES=True # テーブルの作成
+      - BACKEND_CORS_ORIGINS=["http://localhost:3000"] # クロスオリジンリソースシェアリングの設定
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account-key.json # サービスアカウントキーのパス
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "cd /app && poetry install --no-interaction --no-ansi && poetry run alembic upgrade head && poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - medical-chart-network
+
+  # フロントエンド (Next.js)
+  frontend:
+    container_name: medical-chart-frontend
+    build:
+      context: ./medical-chart-frontend # フロントエンドのディレクトリ
+      dockerfile: Dockerfile_local # フロントエンドのDockerfile
+    ports:
+      - "3000:3000" # ポート番号のマッピング
+    volumes:
+      - ./medical-chart-frontend:/app # フロントエンドのディレクトリをマウント
+      - /app/node_modules # ノードモジュールをマウント
+      - /app/.next # ネクストのマウント
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 # バックエンドのAPIのURL
+      - NEXT_PUBLIC_API_KEY=your_api_key_here # バックエンドのAPIキーと同じ
+    depends_on:
+      - backend
+    networks:
+      - medical-chart-network
+
+  # データベース (PostgreSQL)
+  db:
+    container_name: medical-chart-db
+    image: postgres:15-alpine # データベースのイメージ
+    platform: linux/arm64  # ARM64プラットフォーム (M1/M2/M3 Mac) 向けに指定
+    ports:
+      - "5432:5432" # ポート番号のマッピング
+    environment:
+      - POSTGRES_USER=fumipen # データベースのユーザー名
+      - POSTGRES_PASSWORD=your_password_here # データベースのパスワード
+      - POSTGRES_DB=medical_chart_local # データベースの名前
+    volumes:
+      - ./db_data:/var/lib/postgresql/data # ホスト上のローカルディレクトリを使用
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fumipen -d medical_chart_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - medical-chart-network
+
+volumes:
+  postgres_data:
+
+networks:
+  medical-chart-network:
+    driver: bridge 

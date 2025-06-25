@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 依存関係のコピーとインストール
+COPY pyproject.toml poetry.lock* ./
+
+# 依存関係のインストール
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir poetry && \
+    poetry config virtualenvs.create false
+
+# 本番環境用にアプリケーションコードをコピー
+# 開発環境ではボリュームマウントで上書きされる
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+
+# 必要なディレクトリを作成
+RUN mkdir -p /app/local_storage /app/credentials
+
+# The service account key will be mounted at runtime via volume mount
+ENV GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account-key.json
+
+# ポート公開
+EXPOSE 8000
+
+# 開発モード用のスタートアップコマンド
+# Docker Composeからオーバーライドされる
+CMD ["sh", "-c", "poetry install --no-interaction --no-ansi && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"] 

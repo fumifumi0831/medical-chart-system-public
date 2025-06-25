@@ -1,0 +1,22 @@
+FROM node:18-alpine
+
+# pnpmをインストール
+RUN npm install -g pnpm
+
+WORKDIR /app
+
+# 依存関係のインストール
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# その他のファイルをコピー（開発環境では実際にはボリュームでマウントされるため、ビルド時の変更頻度が少ない）
+COPY . .
+
+# テレメトリを無効化
+ENV NEXT_TELEMETRY_DISABLED 1
+
+# ポート公開
+EXPOSE 3000
+
+# 開発サーバー起動
+CMD ["pnpm", "run", "dev"] 
