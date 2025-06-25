@@ -12,8 +12,6 @@ COPY pyproject.toml poetry.lock* ./
 COPY app/ ./app/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
-COPY .env.dev ./.env.dev
-COPY .env.prod ./.env.prod
 
 # 必要なディレクトリを作成
 RUN mkdir -p /app/local_storage /app/credentials
