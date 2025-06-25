@@ -1,0 +1,123 @@
+name: Backend Deployment (Production)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'medical-chart-backend/**'
+      - '.github/workflows/backend-deploy-prod.yml' # Trigger on changes to this file too
+  workflow_dispatch:
+
+# Add this concurrency block
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ENV_NAME: prod
+  SERVICE_NAME: medical-chart-backend
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID_PROD }}
+  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY_PROD }}
+
+jobs:
+  deploy-backend-prod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ env.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker asia-northeast1-docker.pkg.dev --project ${{ env.GCP_PROJECT_ID }} --quiet
+
+      - name: Build and Push Backend Image
+        run: |
+          cd medical-chart-backend
+          SHORT_SHA=${GITHUB_SHA::7}
+          IMAGE_NAME="asia-northeast1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/medical-charts-repo-${{ env.ENV_NAME }}/backend:${SHORT_SHA}"
+          echo "Building image: $IMAGE_NAME for Production"
+
+          # Build image using Cloud Build asynchronously
+          echo "Submitting Cloud Build job asynchronously..."
+          BUILD_ID=$(gcloud builds submit --tag $IMAGE_NAME --project=${{ env.GCP_PROJECT_ID }} . --async --format='value(id)')
+          echo "Submitted Cloud Build job ID: $BUILD_ID"
+
+          # Verify image exists after build (allow some time for build and push)
+          echo "Waiting for image to appear in registry (up to ~2 minutes)..."
+          sleep 30 # Initial wait
+
+          MAX_RETRIES=5
+          RETRY_DELAY=15 # seconds
+          RETRY_COUNT=0
+          IMAGE_FOUND=false
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if gcloud container images describe $IMAGE_NAME --project=${{ env.GCP_PROJECT_ID }} > /dev/null 2>&1; then
+              echo "Image was successfully built and found in registry."
+              echo "image=$IMAGE_NAME" >> $GITHUB_ENV
+              IMAGE_FOUND=true
+              break # Exit loop on success
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+               break # Exit loop after max retries
+            fi
+            echo "Image not found yet, retrying in $RETRY_DELAY seconds... (Attempt $RETRY_COUNT/$MAX_RETRIES)"
+            sleep $RETRY_DELAY
+          done
+
+          if [ "$IMAGE_FOUND" = false ]; then
+            echo "Build failed or image not found after $MAX_RETRIES retries."
+            # Optionally check the build status for more details
+            BUILD_STATUS=$(gcloud builds describe $BUILD_ID --project=${{ env.GCP_PROJECT_ID }} --format='value(status)')
+            echo "Final Build Status for ID $BUILD_ID: $BUILD_STATUS"
+            echo "Check Cloud Build logs for build ID $BUILD_ID in project ${{ env.GCP_PROJECT_ID }} for details."
+            exit 1
+          fi
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.image }} \
+            --platform managed \
+            --region asia-northeast1 \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --service-account=medical-chart-sa@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --memory 1Gi \
+            --set-env-vars="ENVIRONMENT=${{ env.ENV_NAME }},GCS_BUCKET_NAME=medical-charts-${{ env.ENV_NAME }},DEBUG=False,RELOAD=False,BACKEND_CORS_ORIGINS=${{ secrets.FRONTEND_URL_PROD }},GCS_KEY_PATH=/secrets/gcs_key.json" \
+            --add-cloudsql-instances ${{ env.GCP_PROJECT_ID }}:asia-northeast1:medical-charts-db \
+            --set-secrets="DB_CONNECTION_STRING=db-connection-string:latest,API_KEY=api-key:latest,GEMINI_API_KEY=gemini-api-key:latest,/secrets/gcs_key.json=gcs-service-account-key:latest"
+
+      - name: Run Database Migrations
+        run: |
+          # 既存のマイグレーションジョブを削除して再作成
+          echo "Deleting existing migration job if it exists..."
+          gcloud run jobs delete db-migration-${{ env.ENV_NAME }} --region=asia-northeast1 --project=${{ env.GCP_PROJECT_ID }} --quiet || echo "No existing job to delete"
+          
+          # 最新のイメージを使用して新しいジョブを作成
+          echo "Creating new migration job with latest image..."
+          gcloud run jobs create db-migration-${{ env.ENV_NAME }} \
+            --image ${{ env.image }} \
+            --task-timeout=5m \
+            --command="python" \
+            --args="-m","alembic","upgrade","head" \
+            --set-cloudsql-instances ${{ env.GCP_PROJECT_ID }}:asia-northeast1:medical-charts-db \
+            --service-account=medical-chart-sa@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
+            --set-env-vars="ENVIRONMENT=${{ env.ENV_NAME }},GCS_BUCKET_NAME=medical-charts-${{ env.ENV_NAME }},DB_NAME=medical-charts,GCS_KEY_PATH=/secrets/gcs_key.json" \
+            --set-secrets="DB_CONNECTION_STRING=db-connection-string:latest,API_KEY=api-key:latest,GEMINI_API_KEY=gemini-api-key:latest,/secrets/gcs_key.json=gcs-service-account-key:latest" \
+            --region=asia-northeast1 \
+            --project=${{ env.GCP_PROJECT_ID }}
+
+          # マイグレーションジョブを実行
+          echo "Executing database migration job for ${{ env.ENV_NAME }}..."
+          gcloud run jobs execute db-migration-${{ env.ENV_NAME }} --region=asia-northeast1 --project=${{ env.GCP_PROJECT_ID }} --wait
+          echo "Database migration job completed for ${{ env.ENV_NAME }}." 

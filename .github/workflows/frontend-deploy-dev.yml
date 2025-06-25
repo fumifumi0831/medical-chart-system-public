@@ -1,0 +1,112 @@
+name: Frontend Deployment (Development)
+
+on:
+  push:
+    branches: [ develop ]
+    paths:
+      - 'medical-chart-frontend/**'
+      - '.github/workflows/frontend-deploy-dev.yml' # Trigger on changes to this file too
+  workflow_dispatch:
+
+# Add this concurrency block
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ENV_NAME: dev
+  SERVICE_NAME: medical-chart-frontend-dev
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID_DEV }}
+  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY_DEV }}
+  LOG_BUCKET_SECRET_NAME: GCP_LOG_BUCKET_DEV # Optional: Use if log bucket name is stored as secret
+  DEFAULT_LOG_BUCKET_PATTERN: "gs://${{ secrets.GCP_PROJECT_ID_DEV }}-cloudbuild-logs-dev" # Used if LOG_BUCKET_SECRET_NAME is not set or empty
+
+jobs:
+  deploy-frontend-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ env.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker asia-northeast1-docker.pkg.dev --project ${{ env.GCP_PROJECT_ID }} --quiet
+
+      - name: Get Backend URL
+        id: backend_url
+        run: |
+          # Development backend service name is assumed to be 'medical-chart-backend-dev'
+          BACKEND_SERVICE_NAME="medical-chart-backend-${{ env.ENV_NAME }}"
+          BACKEND_URL=$(gcloud run services describe $BACKEND_SERVICE_NAME --platform managed --region=asia-northeast1 --project ${{ env.GCP_PROJECT_ID }} --format="value(status.url)")
+          echo "BACKEND_URL=$BACKEND_URL" >> $GITHUB_ENV
+
+      - name: Get API Key from Secret Manager
+        id: get_api_key
+        run: |
+          API_KEY=$(gcloud secrets versions access latest --secret=api-key-${{ env.ENV_NAME }} --project ${{ env.GCP_PROJECT_ID }})
+          echo "API key retrieved successfully for dev"
+          echo "API_KEY=$API_KEY" >> $GITHUB_ENV
+
+      - name: Create or Update cloudbuild.yaml
+        run: |
+          cd medical-chart-frontend
+          cat > cloudbuild.yaml << EOF
+          steps:
+            - name: 'gcr.io/cloud-builders/docker'
+              args: [
+                'build',
+                '--build-arg', 'NEXT_PUBLIC_API_URL=\${_BACKEND_URL}',
+                '--build-arg', 'NEXT_PUBLIC_API_KEY=\${_API_KEY}',
+                '--build-arg', 'NEXT_PUBLIC_ENVIRONMENT=\${_ENV_NAME}',
+                '-t', 'asia-northeast1-docker.pkg.dev/\${_PROJECT_ID}/medical-charts-repo-\${_ENV_NAME}/frontend:\${_GITHUB_SHA}',
+                '.'
+              ]
+          images:
+            - 'asia-northeast1-docker.pkg.dev/\${_PROJECT_ID}/medical-charts-repo-\${_ENV_NAME}/frontend:\${_GITHUB_SHA}'
+          options:
+            logging: GCS_ONLY # Log only to GCS
+          logsBucket: '\${_LOG_BUCKET}' # Reference the log bucket variable
+          EOF
+
+      - name: Build and Push Frontend Image with Cloud Build
+        run: |
+          cd medical-chart-frontend
+          SHORT_SHA=${GITHUB_SHA::7}
+
+          # Determine the log bucket to use
+          LOG_BUCKET_NAME_FROM_SECRET=$(echo "${{ secrets[env.LOG_BUCKET_SECRET_NAME] || '' }}")
+          LOG_BUCKET="${LOG_BUCKET_NAME_FROM_SECRET:-${{ env.DEFAULT_LOG_BUCKET_PATTERN }}}"
+          echo "Using Cloud Build log bucket: $LOG_BUCKET"
+
+          # Check if the bucket exists, create if not
+          if ! gsutil ls $LOG_BUCKET &>/dev/null; then
+            echo "Creating logs bucket $LOG_BUCKET"
+            gsutil mb -p ${{ env.GCP_PROJECT_ID }} -l asia-northeast1 $LOG_BUCKET
+          fi
+
+          # Submit build with custom log bucket
+          gcloud builds submit --config=cloudbuild.yaml \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --substitutions="_ENV_NAME=${{ env.ENV_NAME }},_PROJECT_ID=${{ env.GCP_PROJECT_ID }},_BACKEND_URL=${{ env.BACKEND_URL }},_API_KEY=$(echo ${{ env.API_KEY }} | sed 's/"/\\"/g'),_GITHUB_SHA=${SHORT_SHA},_LOG_BUCKET=${LOG_BUCKET}"
+
+          echo "image=asia-northeast1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/medical-charts-repo-${{ env.ENV_NAME }}/frontend:${SHORT_SHA}" >> $GITHUB_ENV
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.image }} \
+            --platform managed \
+            --region asia-northeast1 \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --service-account=medical-chart-${{ env.ENV_NAME }}-sa@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --quiet 
